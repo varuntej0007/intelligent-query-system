@@ -69,10 +69,10 @@ class QueryResponse(BaseModel):
 executor = ThreadPoolExecutor(max_workers=os.cpu_count())
 
 # Load the sentence transformer model once at startup
-# This model is great for semantic similarity tasks.
+# This model is smaller and more memory-efficient for free hosting tiers.
 logger.info("Loading Sentence Transformer model...")
 try:
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+    model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
     logger.info("Sentence Transformer model loaded successfully.")
 except Exception as e:
     logger.error(f"Failed to load Sentence Transformer model: {e}")
