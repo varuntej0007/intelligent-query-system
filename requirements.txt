@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.0
+requests
+beautifulsoup4
+pypdf
+python-dotenv
+gunicorn
