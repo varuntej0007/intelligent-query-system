@@ -1,10 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn
 python-multipart
-sentence-transformers>=2.2.0
-faiss-cpu>=1.7.0
+sentence-transformers
+faiss-cpu
 requests
-beautifulsoup4
 pypdf
 python-dotenv
 gunicorn
+torch
