@@ -1,7 +1,3 @@
-# main.py
-# To run this code, you'll need to install the following libraries:
-# pip install fastapi uvicorn python-multipart "sentence-transformers>=2.2.0" "faiss-cpu>=1.7.0" requests beautifulsoup4 pypdf python-dotenv
-
 import os
 import requests
 from fastapi import FastAPI, Request, HTTPException, Security
@@ -69,10 +65,10 @@ class QueryResponse(BaseModel):
 executor = ThreadPoolExecutor(max_workers=os.cpu_count())
 
 # Load the sentence transformer model once at startup
-# This model is smaller and more memory-efficient for free hosting tiers.
+# Switching back to the more accurate model for better performance.
 logger.info("Loading Sentence Transformer model...")
 try:
-    model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     logger.info("Sentence Transformer model loaded successfully.")
 except Exception as e:
     logger.error(f"Failed to load Sentence Transformer model: {e}")
@@ -180,9 +176,11 @@ async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> 
 
     context_separator = "\n---\n"
     prompt = f"""
-    Based *only* on the following context from a policy document, please answer the question.
-    If the context does not contain the answer, state that the information is not found in the provided text.
-    Do not use any external knowledge. Be concise and directly answer the question.
+    You are an expert Q&A system for policy documents.
+    Based *only* on the following context, please provide a precise and concise answer to the question.
+    If the context contains the direct answer, quote it.
+    If the information is not in the context, state that the answer is not found in the provided text.
+    Do not use any external knowledge.
 
     Context:
     ---
@@ -191,7 +189,7 @@ async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> 
 
     Question: {question}
 
-    Answer:
+    Precise Answer:
     """
     
     logger.info(f"Generating answer for: '{question}'")
@@ -201,7 +199,7 @@ async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.1,
             "topP": 0.95,
             "maxOutputTokens": 500,
         }
