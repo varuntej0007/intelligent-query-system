@@ -1,6 +1,11 @@
+# main.py
+# To run this code, you'll need to install the following libraries:
+# pip install fastapi uvicorn python-multipart "sentence-transformers>=2.2.0" "faiss-cpu>=1.7.0" requests beautifulsoup4 pypdf python-dotenv
+
 import os
 import requests
 from fastapi import FastAPI, Request, HTTPException, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -13,6 +18,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from dotenv import load_dotenv
+import re
 
 # --- Configuration ---
 # Load environment variables from a .env file
@@ -21,6 +27,25 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- FastAPI App Initialization ---
+app = FastAPI(
+    title="LLM-Powered Intelligent Query–Retrieval System",
+    description="Processes documents to answer natural language questions.",
+    version="1.0.0"
+)
+
+# --- CORS Middleware ---
+# This is the new section that fixes the "Failed to fetch" error.
+# It allows web browsers to make requests to your API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 
 # --- API Key Authentication ---
 API_KEY = "cf9b8191780fa01632ebe2dbe4978af143231eb6d8efb49f0a727fe116f10143"
@@ -40,13 +65,6 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
         raise HTTPException(status_code=403, detail="Could not validate credentials")
     return token
 
-# --- FastAPI App Initialization ---
-app = FastAPI(
-    title="LLM-Powered Intelligent Query–Retrieval System",
-    description="Processes documents to answer natural language questions.",
-    version="1.0.0"
-)
-
 # --- Pydantic Models for API ---
 class QueryRequest(BaseModel):
     documents: str = Field(..., description="URL to the PDF document.")
@@ -65,7 +83,7 @@ class QueryResponse(BaseModel):
 executor = ThreadPoolExecutor(max_workers=os.cpu_count())
 
 # Load the sentence transformer model once at startup
-# Switching back to the more accurate model for better performance.
+# Using the more accurate model for better performance.
 logger.info("Loading Sentence Transformer model...")
 try:
     model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -83,7 +101,7 @@ def download_and_extract_text(pdf_url: str) -> str:
     logger.info(f"Downloading document from: {pdf_url}")
     try:
         response = requests.get(pdf_url, timeout=30)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response.raise_for_status()
         
         logger.info("Document downloaded. Extracting text.")
         with BytesIO(response.content) as f:
@@ -92,7 +110,8 @@ def download_and_extract_text(pdf_url: str) -> str:
             for page in reader.pages:
                 page_text = page.extract_text()
                 if page_text:
-                    text += page_text + "\n"
+                    clean_text = re.sub(r'\s*\n\s*', '\n', page_text.strip())
+                    text += clean_text + "\n\n"
         logger.info(f"Text extracted. Total characters: {len(text)}")
         return text
     except requests.exceptions.RequestException as e:
@@ -102,28 +121,24 @@ def download_and_extract_text(pdf_url: str) -> str:
         logger.error(f"Failed to process PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process PDF file: {e}")
 
-def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+def chunk_text(text: str) -> List[str]:
     """
-    Splits a long text into smaller, overlapping chunks.
-    This helps in creating more focused embeddings.
+    Splits a long text into chunks based on paragraphs.
+    This provides more semantically coherent context to the LLM.
     """
-    logger.info("Chunking extracted text.")
+    logger.info("Chunking extracted text by paragraphs.")
     if not text:
         return []
     
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
-    logger.info(f"Text chunked into {len(chunks)} chunks.")
+    paragraphs = re.split(r'\n\s*\n', text)
+    chunks = [p.strip() for p in paragraphs if len(p.strip()) > 50]
+    
+    logger.info(f"Text chunked into {len(chunks)} paragraphs.")
     return chunks
 
 def create_faiss_index(chunks: List[str], model: SentenceTransformer) -> Optional[faiss.Index]:
     """
     Creates a FAISS index for a list of text chunks.
-    FAISS allows for very fast similarity searches.
     """
     if not chunks or model is None:
         logger.warning("No chunks or model available to create FAISS index.")
@@ -132,10 +147,10 @@ def create_faiss_index(chunks: List[str], model: SentenceTransformer) -> Optiona
     logger.info("Creating embeddings for text chunks...")
     try:
         embeddings = model.encode(chunks, convert_to_tensor=False, show_progress_bar=True)
-        embeddings = np.array(embeddings).astype('float32') # FAISS requires float32
+        embeddings = np.array(embeddings).astype('float32')
         
         dimension = embeddings.shape[1]
-        index = faiss.IndexFlatL2(dimension)  # Using L2 distance for similarity
+        index = faiss.IndexFlatL2(dimension)
         index.add(embeddings)
         
         logger.info(f"FAISS index created successfully with {index.ntotal} vectors.")
@@ -157,17 +172,15 @@ def search_faiss_index(query: str, index: faiss.Index, chunks: List[str], model:
     
     distances, indices = index.search(query_embedding, k)
     
-    # Return the actual text chunks corresponding to the top indices
     return [chunks[i] for i in indices[0] if i < len(chunks)]
 
 async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> str:
     """
     Uses the Gemini API to generate an answer based on the question and retrieved context.
     """
-    # Get the API key from environment variables
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
-        error_msg = "GEMINI_API_KEY environment variable not found. Please set it to your Google AI Studio API key."
+        error_msg = "GEMINI_API_KEY environment variable not found."
         logger.error(error_msg)
         return f"Configuration Error: {error_msg}"
 
@@ -226,9 +239,8 @@ async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> 
 
     except requests.exceptions.RequestException as e:
         logger.error(f"API call to LLM failed: {e}")
-        # Provide a more specific error message if it's a 4xx error
         if e.response is not None and 400 <= e.response.status_code < 500:
-             return f"Error: API request failed with status {e.response.status_code}. This could be due to an invalid API key or billing issues. Please check your Google AI Studio account."
+             return f"Error: API request failed with status {e.response.status_code}. This could be due to an invalid API key or billing issues."
         return f"Error: Could not connect to the language model API. {e}"
     except (KeyError, IndexError) as e:
         logger.error(f"Invalid response structure from LLM API: {e}. Response: {result}")
@@ -242,17 +254,10 @@ async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> 
 @app.post("/hackrx/run", response_model=QueryResponse, tags=["Query System"])
 async def run_submission(request: QueryRequest, api_key: str = Security(get_api_key)):
     """
-    This endpoint orchestrates the entire query-retrieval process:
-    1.  Downloads and parses the document from the provided URL.
-    2.  Chunks the text for processing.
-    3.  Creates embeddings and a FAISS index for semantic search.
-    4.  For each question:
-        a. Searches the index for relevant context.
-        b. Prompts an LLM with the context and question to get an answer.
-    5.  Returns a structured JSON response with the answers.
+    This endpoint orchestrates the entire query-retrieval process.
     """
     if model is None:
-        raise HTTPException(status_code=503, detail="Model is not available. The service is starting up or encountered an error.")
+        raise HTTPException(status_code=503, detail="Model is not available.")
 
     loop = asyncio.get_running_loop()
 
