@@ -36,16 +36,13 @@ app = FastAPI(
 )
 
 # --- CORS Middleware ---
-# This is the new section that fixes the "Failed to fetch" error.
-# It allows web browsers to make requests to your API.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
 
 # --- API Key Authentication ---
 API_KEY = "cf9b8191780fa01632ebe2dbe4978af143231eb6d8efb49f0a727fe116f10143"
@@ -55,7 +52,6 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 async def get_api_key(api_key_header: str = Security(api_key_header)):
     """
     Dependency to validate the API key.
-    The key is expected in the format "Bearer <key>".
     """
     if not api_key_header.startswith("Bearer "):
         raise HTTPException(status_code=403, detail="Invalid authorization scheme.")
@@ -69,21 +65,13 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
 class QueryRequest(BaseModel):
     documents: str = Field(..., description="URL to the PDF document.")
     questions: List[str] = Field(..., description="List of questions to answer based on the document.")
-
-class Answer(BaseModel):
-    question: str
-    answer: str
-    source_text: Optional[str] = None
     
 class QueryResponse(BaseModel):
     answers: List[str]
 
 # --- Global Variables & Models ---
-# Using a thread pool for concurrent network and CPU-bound tasks
 executor = ThreadPoolExecutor(max_workers=os.cpu_count())
 
-# Load the sentence transformer model once at startup
-# Using the more accurate model for better performance.
 logger.info("Loading Sentence Transformer model...")
 try:
     model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -146,7 +134,7 @@ def create_faiss_index(chunks: List[str], model: SentenceTransformer) -> Optiona
         
     logger.info("Creating embeddings for text chunks...")
     try:
-        embeddings = model.encode(chunks, convert_to_tensor=False, show_progress_bar=True)
+        embeddings = model.encode(chunks, convert_to_tensor=False, show_progress_bar=False)
         embeddings = np.array(embeddings).astype('float32')
         
         dimension = embeddings.shape[1]
@@ -249,7 +237,6 @@ async def generate_answer_with_llm(question: str, context_chunks: List[str]) -> 
         logger.error(f"An unexpected error occurred during LLM answer generation: {e}")
         return "An unexpected error occurred while generating the answer."
 
-
 # --- API Endpoint Implementation ---
 @app.post("/hackrx/run", response_model=QueryResponse, tags=["Query System"])
 async def run_submission(request: QueryRequest, api_key: str = Security(get_api_key)):
@@ -301,6 +288,3 @@ async def run_submission(request: QueryRequest, api_key: str = Security(get_api_
 @app.get("/", include_in_schema=False)
 async def root():
     return {"message": "Welcome to the Intelligent Query–Retrieval System. See /docs for API documentation."}
-
-# To run the app, use the command:
-# uvicorn main:app --reload
