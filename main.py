@@ -1,6 +1,3 @@
-Of course. Here is the code from the Canvas that you selected.
-
-```python
 # main.py
 # To run this code, you'll need to install the following libraries:
 # pip install fastapi uvicorn python-multipart "sentence-transformers>=2.2.0" "faiss-cpu>=1.7.0" requests beautifulsoup4 pypdf python-dotenv
@@ -291,4 +288,3 @@ async def run_submission(request: QueryRequest, api_key: str = Security(get_api_
 @app.get("/", include_in_schema=False)
 async def root():
     return {"message": "Welcome to the Intelligent Query–Retrieval System. See /docs for API documentation."}
-```
