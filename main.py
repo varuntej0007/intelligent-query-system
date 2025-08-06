@@ -1,64 +1,143 @@
-# evaluation_script.py
-import difflib
+# main.py - High Accuracy Version (Target: >50%)
+
+import os
+import requests
+from fastapi import FastAPI, Request, HTTPException, Security
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel, Field
+from typing import List, Optional
 import numpy as np
-import time
+from sentence_transformers import SentenceTransformer
+import faiss
+from pypdf import PdfReader
+from io import BytesIO
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import logging
+from dotenv import load_dotenv
+import re
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Sample predictions and ground truth answers
-documents = "https://hackrx.blob.core.windows.net/assets/policy.pdf?..."
-questions = [
-    "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
-    "What is the waiting period for pre-existing diseases (PED) to be covered?",
-    "Does this policy cover maternity expenses, and what are the conditions?",
-    "What is the waiting period for cataract surgery?",
-    "Are the medical expenses for an organ donor covered under this policy?",
-    "What is the No Claim Discount (NCD) offered in this policy?",
-    "Is there a benefit for preventive health check-ups?",
-    "How does the policy define a 'Hospital'?",
-    "What is the extent of coverage for AYUSH treatments?",
-    "Are there any sub-limits on room rent and ICU charges for Plan A?"
-]
+load_dotenv()
 
-predicted_answers = [
-    "A grace period of thirty days is provided for premium payment after the due date to renew or continue the policy without losing continuity benefits.",
-    "There is a waiting period of thirty-six (36) months of continuous coverage from the first policy inception for pre-existing diseases and their direct complications to be covered.",
-    "Yes, the policy covers maternity expenses, including childbirth and lawful medical termination of pregnancy. To be eligible, the female insured person must have been continuously covered for at least 24 months. The benefit is limited to two deliveries or terminations during the policy period.",
-    "The policy has a specific waiting period of two (2) years for cataract surgery.",
-    "Yes, the policy indemnifies the medical expenses for the organ donor's hospitalization for the purpose of harvesting the organ, provided the organ is for an insured person and the donation complies with the Transplantation of Human Organs Act, 1994.",
-    "A No Claim Discount of 5% on the base premium is offered on renewal for a one-year policy term if no claims were made in the preceding year. The maximum aggregate NCD is capped at 5% of the total base premium.",
-    "Yes, the policy reimburses expenses for health check-ups at the end of every block of two continuous policy years, provided the policy has been renewed without a break. The amount is subject to the limits specified in the Table of Benefits.",
-    "A hospital is defined as an institution with at least 10 inpatient beds (in towns with a population below ten lakhs) or 15 beds (in all other places), with qualified nursing staff and medical practitioners available 24/7, a fully equipped operation theatre, and which maintains daily records of patients.",
-    "The policy covers medical expenses for inpatient treatment under Ayurveda, Yoga, Naturopathy, Unani, Siddha, and Homeopathy systems up to the Sum Insured limit, provided the treatment is taken in an AYUSH Hospital.",
-    "Yes, for Plan A, the daily room rent is capped at 1% of the Sum Insured, and ICU charges are capped at 2% of the Sum Insured. These limits do not apply if the treatment is for a listed procedure in a Preferred Provider Network (PPN)."
-]
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-ground_truth_answers = predicted_answers  # Assuming perfect match for this test
+app = FastAPI(title="High Accuracy LLM Query System")
 
-def fuzzy_accuracy_score(predictions, ground_truths, threshold=0.75):
-    scores = []
-    for pred, truth in zip(predictions, ground_truths):
-        similarity = difflib.SequenceMatcher(None, pred.lower(), truth.lower()).ratio()
-        scores.append(similarity)
-    accuracy = sum(1 for s in scores if s >= threshold) / len(scores)
-    return round(accuracy * 100, 2), [round(s, 2) for s in scores]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def run_evaluation():
-    start = time.time()
-    accuracy_percent, similarity_scores = fuzzy_accuracy_score(predicted_answers, ground_truth_answers)
-    end = time.time()
+API_KEY = os.getenv("API_KEY", "cf9b8191780fa01632ebe2dbe4978af143231eb6d8efb49f0a727fe116f10143")
+API_KEY_NAME = "Authorization"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
-    total_eval_time = round(end - start, 3)
-    average_score = round(np.mean(similarity_scores), 2)
-    avg_response_time = 1.4  # Simulated LLM latency per question
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if not api_key_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Invalid authorization scheme.")
+    token = api_key_header.split(" ")[1]
+    if token != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid credentials.")
+    return token
 
-    print("\nEvaluation Report")
-    print("------------------------")
-    print(f"Accuracy: {accuracy_percent}%")
-    print(f"Avg Similarity Score: {average_score}")
-    print(f"Avg LLM Response Time: {avg_response_time}s")
-    print(f"Evaluation Script Time: {total_eval_time}s")
-    print("\nDetailed Scores:")
-    for i, score in enumerate(similarity_scores):
-        print(f"Q{i+1}: {score}")
+class QueryRequest(BaseModel):
+    documents: str
+    questions: List[str]
 
-if __name__ == "__main__":
-    run_evaluation()
+class QueryResponse(BaseModel):
+    answers: List[str]
+
+executor = ThreadPoolExecutor(max_workers=os.cpu_count())
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# --- Helper Functions ---
+def download_and_extract_text(pdf_url: str) -> str:
+    response = requests.get(pdf_url, timeout=30)
+    response.raise_for_status()
+    reader = PdfReader(BytesIO(response.content))
+    text = ""
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += re.sub(r'\s*\n\s*', ' ', page_text.strip()) + "\n"
+    return text
+
+def chunk_text(text: str) -> List[str]:
+    paragraphs = re.split(r'\n\s*\n', text)
+    chunks, buffer = [], ""
+    for p in paragraphs:
+        buffer += p + "\n"
+        if len(buffer) > 1000:
+            chunks.append(buffer.strip())
+            buffer = ""
+    if buffer:
+        chunks.append(buffer.strip())
+    return [c for c in chunks if len(c) > 50]
+
+def create_faiss_index(chunks: List[str]) -> faiss.Index:
+    embeddings = model.encode(chunks, convert_to_tensor=False, normalize_embeddings=True)
+    embeddings = np.array(embeddings).astype('float32')
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
+    return index
+
+def search_index(query: str, index: faiss.Index, chunks: List[str], k: int = 12) -> List[str]:
+    query_vec = model.encode([query], convert_to_tensor=False, normalize_embeddings=True).astype('float32')
+    distances, indices = index.search(query_vec, k)
+    results = [chunks[i] for i, score in zip(indices[0], distances[0]) if i < len(chunks) and score > 0.6]
+    return results[:6]  # Cap context size to 6 chunks for better focus
+
+async def call_gemini(prompt: str) -> str:
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        return "GEMINI_API_KEY not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={gemini_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topP": 0.9,
+            "maxOutputTokens": 300
+        }
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+    except Exception as e:
+        return f"LLM error: {str(e)}"
+
+# --- Core Endpoint ---
+@app.post("/hackrx/run", response_model=QueryResponse)
+async def run_query(request: QueryRequest, api_key: str = Security(get_api_key)):
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(executor, download_and_extract_text, request.documents)
+    chunks = await loop.run_in_executor(executor, chunk_text, text)
+    index = await loop.run_in_executor(executor, create_faiss_index, chunks)
+
+    async def process(q):
+        context = await loop.run_in_executor(executor, search_index, q, index, chunks)
+        prompt = f"""
+You are a document expert AI.
+Answer the following question using ONLY the information in the context.
+If no direct answer exists, reply with: 'Answer not found in the provided context.'
+
+Context:
+---\n{chr(10).join(context)}\n---
+Question: {q}
+Step-by-step reasoning followed by final answer:
+"""
+        return await call_gemini(prompt)
+
+    answers = await asyncio.gather(*[process(q) for q in request.questions])
+    return QueryResponse(answers=answers)
+
+@app.get("/")
+async def root():
+    return {"message": "High Accuracy API is running. Visit /docs"}
